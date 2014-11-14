@@ -17,16 +17,16 @@
  * under the License.
  */
 
-package com.hp.flume.plugins.source;
+package com.hp.flume.plugins.spoolsource;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.io.Files;
 
-//import org.apache.commons.io.FileUtils;
-//import org.apache.commons.io.filefilter.IOFileFilter;
-//import org.apache.commons.lang.StringUtils;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.filefilter.IOFileFilter;
+import org.apache.commons.lang.StringUtils;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
 import org.apache.flume.FlumeException;
@@ -45,8 +45,9 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
+import org.apache.flume.client.avro.ReliableEventReader;
 /**
  * <p/>
  * A {@link ReliableEventReader} which reads log data from files stored in a
@@ -98,14 +99,12 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 	private final String deletePolicy;
 	private final Charset inputCharset;
 	private final DecodeErrorPolicy decodeErrorPolicy;
-	@SuppressWarnings("unused")
 	private final ConsumeOrder consumeOrder;
 
 	private Optional<FileInfo> currentFile = Optional.absent();
 	/** Always contains the last file from which lines have been read. **/
 	private Optional<FileInfo> lastFileRead = Optional.absent();
 	private boolean committed = true;
-	private static ResettableInputStream in;
 
 	/**
 	 * Create a ReliableSpoolingFileEventReader to watch the given directory.
@@ -250,87 +249,43 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 		}
 	}
 
-	public List<Event> readEvents(int numEvents) throws IOException// lucheng
-																	// revised
+	public List<Event> readEvents(int numEvents) throws IOException
 	{
-		List<Event> events = null;
-		Optional<FileInfo> nextFile = null;
-		do
+		if (!committed)
 		{
-			try
+			if (!currentFile.isPresent())
 			{
-				Thread.sleep(1);// sleep
+				throw new IllegalStateException("File should not roll when "
+						+ "commit is outstanding.");
 			}
-			catch (InterruptedException e)
-			{
-				e.printStackTrace();
-			}
-			if (!committed)
-			{
-				if (!currentFile.isPresent())
-				{
-					throw new IllegalStateException(
-							"File should not roll when "
-									+ "commit is outstanding.");
-				}
-				logger.info("Last read was never committed - resetting mark position.");
-
-				// logger.info(currentFile.get().getFile().getAbsolutePath());
-				// currentFile = openFile(new File(
-				// "/home/lucheng/Desktop/httpd-2.4.10/logs/ne"));// lucheng
-
-				currentFile.get().getDeserializer().reset();
-			}
-			else
-			{
-				// Check if new files have arrived since last call
-				if (!currentFile.isPresent())
-				{
-					currentFile = getNextFile();
-				}
-				// Return empty list if no new files
-				if (!currentFile.isPresent())
-				{
-
-					logger.info("\n!!!!!!!!!LuCheng :: No new files detected!!!!!!!!!!!!!!!!!\n");
-					return Collections.emptyList();
-				}
-			}
-
-			currentFile = openFile(currentFile.get().getFile());
+			logger.info("Last read was never committed - resetting mark position.");
 			currentFile.get().getDeserializer().reset();
-			EventDeserializer des = currentFile.get().getDeserializer();
-			events = des.readEvents(numEvents);
-
-			if (!events.isEmpty())
-				break;
-			else
+		}
+		else
+		{
+			// Check if new files have arrived since last call
+			if (!currentFile.isPresent())
 			{
-				nextFile = getNextFile();
-				String nextName = nextFile.get().getFile().getAbsolutePath();
-				String currentName = currentFile.get().getFile()
-						.getAbsolutePath();
-
-				if (!nextName.equals(currentName))// TODO sequence adjust
-					break;
+				currentFile = getNextFile();
 			}
-			// currentFile = openFile(currentFile.get().getFile());// lucheng
-			// // ad reopen
-			// else
-			// break;
-			// currentFile.get().getDeserializer().reset();
-			// EventDeserializer des = currentFile.get().getDeserializer();
-			// events = des.readEvents(numEvents);
-		} while (events.isEmpty());
+			// Return empty list if no new files
+			if (!currentFile.isPresent())
+			{
+				return Collections.emptyList();
+			}
+		}
+
+		EventDeserializer des = currentFile.get().getDeserializer();
+		List<Event> events = des.readEvents(numEvents);
 
 		/*
 		 * It's possible that the last read took us just up to a file boundary.
 		 * If so, try to roll to the next file, if there is one.
 		 */
-		if (events == null || events.isEmpty())
+		if (events.isEmpty())
 		{
-			retireCurrentFile();// lucheng not retire flag
-			currentFile = nextFile;
+			retireCurrentFile();
+			currentFile = getNextFile();
 			if (!currentFile.isPresent())
 			{
 				return Collections.emptyList();
@@ -393,7 +348,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 	 * @throws FlumeException
 	 *             if files do not conform to spooling assumptions
 	 */
-	private void retireCurrentFile() throws IOException// lucheng revised
+	private void retireCurrentFile() throws IOException
 	{
 		Preconditions.checkState(currentFile.isPresent());
 
@@ -403,28 +358,22 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 		currentFile.get().getDeserializer().close();
 
 		// Verify that spooling assumptions hold
-
-		logger.info("!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-		logger.info(fileToRoll.lastModified() + " |||||| "
-				+ currentFile.get().getLastModified());
-		logger.info("!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-		// if (fileToRoll.lastModified() !=
-		// currentFile.get().getLastModified())//LUCHENG
-		// {
-		// String message = "File has been modified since being read: "
-		// + fileToRoll;
-		// throw new IllegalStateException(message);
-		// }
-		// if (fileToRoll.length() != currentFile.get().getLength())
-		// {
-		// String message = "File has changed size since being read: "
-		// + fileToRoll;
-		// throw new IllegalStateException(message);
-		// }
+		if (fileToRoll.lastModified() != currentFile.get().getLastModified())// LUCHENG
+		{
+			String message = "File has been modified since being read: "
+					+ fileToRoll;
+			throw new IllegalStateException(message);
+		}
+		if (fileToRoll.length() != currentFile.get().getLength())
+		{
+			String message = "File has changed size since being read: "
+					+ fileToRoll;
+			throw new IllegalStateException(message);
+		}
 
 		if (deletePolicy.equalsIgnoreCase(DeletePolicy.NEVER.name()))
 		{
-			rollCurrentFile(fileToRoll);// /SUFFIX LUCHENG
+			rollCurrentFile(fileToRoll);
 		}
 		else if (deletePolicy.equalsIgnoreCase(DeletePolicy.IMMEDIATE.name()))
 		{
@@ -432,6 +381,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 		}
 		else
 		{
+			// TODO: implement delay in the future
 			throw new IllegalArgumentException("Unsupported delete policy: "
 					+ deletePolicy);
 		}
@@ -450,7 +400,6 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 		logger.info("Preparing to move file {} to {}", fileToRoll, dest);
 
 		// Before renaming, check whether destination file name exists
-		// lucheng to test
 		if (dest.exists() && PlatformDetect.isWindows())
 		{
 			/*
@@ -475,7 +424,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 			}
 			else
 			{
-				String message = "Windows Exception :: File name has been re-used with different"
+				String message = "File name has been re-used with different"
 						+ " files. Spooling assumptions violated for " + dest;
 				throw new IllegalStateException(message);
 			}
@@ -484,7 +433,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 		}
 		else if (dest.exists())
 		{
-			String message = "Linux Exception :: File name has been re-used with different"
+			String message = "File name has been re-used with different"
 					+ " files. Spooling assumptions violated for " + dest;
 			throw new IllegalStateException(message);
 
@@ -554,7 +503,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 	 * {@link #consumeOrder} variable is {@link ConsumeOrder#RANDOM} then
 	 * returns any arbitrary file in the directory.
 	 */
-	private Optional<FileInfo> getNextFile()// lucheng revised
+	private Optional<FileInfo> getNextFile()
 	{
 		/* Filter to exclude finished or hidden files */
 		FileFilter filter = new FileFilter()
@@ -562,11 +511,27 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 			public boolean accept(File candidate)
 			{
 				String fileName = candidate.getName();
+				// lucheng
+				// int date =
+				// String regEx = "[a-zA-Z]+_\\d{4}_\\d{2}_(\\d{2})";
+				// Pattern pat = Pattern.compile(regEx);
+				//
+				// Matcher mat = pat.matcher(fileName);
+				// mat.find();
+				// int fileDate = Integer.parseInt(mat.group(1));
+//				Matcher mat = Pattern.compile(
+//						"[a-zA-Z]+_\\d{4}_\\d{2}_(\\d{2})").matcher(fileName);
+//				mat.find();
+				Long time = candidate.lastModified();
+				Date dt = new Date();
+				dt.setTime(time);
+				int modifiedTime = dt.getDate();
 				if ((candidate.isDirectory())
 						|| (fileName.endsWith(completedSuffix))
 						|| (fileName.startsWith("."))
 						|| ignorePattern.matcher(fileName).matches()
-						|| (fileName.endsWith("~")))
+						|| new Date().getDate() == modifiedTime/*Integer.parseInt(mat
+								.group(1))*/)
 				{
 					return false;
 				}
@@ -574,51 +539,54 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 			}
 		};
 		List<File> candidateFiles = Arrays.asList(spoolDirectory
-				.listFiles(filter));// lucheng
-
-		// String file = new String();
-		// for(File i : candidateFiles)
-		// {
-		// file += i.getAbsolutePath() + " && ";
-		// }
-
-		// logger.debug(file);
-
+				.listFiles(filter));
 		if (candidateFiles.isEmpty())
-		{ // No matching file in spooling
-			// directory.
+		{ // No matching file in spooling directory.
 			return Optional.absent();
 		}
-		File rdFile, selectedFile;
-		Random rd = new Random();
-		do
+
+		File selectedFile = candidateFiles.get(0); // Select the first random
+													// file.
+		if (consumeOrder == ConsumeOrder.RANDOM)
+		{ // Selected file is random.
+			return openFile(selectedFile);
+		}
+		else if (consumeOrder == ConsumeOrder.YOUNGEST)
 		{
-			int num = rd.nextInt(candidateFiles.size());
-			rdFile = candidateFiles.get(num);
-			selectedFile = candidateFiles.get(0);
 			for (File candidateFile : candidateFiles)
 			{
 				long compare = selectedFile.lastModified()
 						- candidateFile.lastModified();
 				if (compare == 0)
-				{ // ts is same pick smallest
-					// lexicographically.
+				{ // ts is same pick smallest lexicographically.
 					selectedFile = smallerLexicographical(selectedFile,
 							candidateFile);
 				}
 				else if (compare < 0)
-				{
+				{ // candidate is younger (cand-ts > selec-ts)
 					selectedFile = candidateFile;
 				}
 			}
+		}
+		else
+		{ // default order is OLDEST
+			for (File candidateFile : candidateFiles)
+			{
+				long compare = selectedFile.lastModified()
+						- candidateFile.lastModified();
+				if (compare == 0)
+				{ // ts is same pick smallest lexicographically.
+					selectedFile = smallerLexicographical(selectedFile,
+							candidateFile);
+				}
+				else if (compare > 0)
+				{ // candidate is older (cand-ts < selec-ts).
+					selectedFile = candidateFile;
+				}
+			}
+		}
 
-		} while (rdFile.getAbsolutePath()
-				.equals(selectedFile.getAbsolutePath())
-				&& candidateFiles.size() > 2);// obsolete algorithm
-
-		if (candidateFiles.size() == 2)
-			return openFile(selectedFile);
-		return openFile(rdFile);
+		return openFile(selectedFile);
 	}
 
 	private File smallerLexicographical(File f1, File f2)
@@ -637,7 +605,7 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 	 * @return {@link #FileInfo} for the file to consume or absent option if the
 	 *         file does not exists or readable.
 	 */
-	private Optional<FileInfo> openFile(File file)// lucheng revised
+	private Optional<FileInfo> openFile(File file)
 	{
 		try
 		{
@@ -657,11 +625,10 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 			Preconditions.checkState(tracker.getTarget().equals(nextPath),
 					"Tracker target %s does not equal expected filename %s",
 					tracker.getTarget(), nextPath);
-			if (in != null)
-				in.close();// lucheng-close the file
-			in = new ResettableFileInputStream(file, tracker,
-					ResettableFileInputStream.DEFAULT_BUF_SIZE, inputCharset,
-					decodeErrorPolicy);
+
+			ResettableInputStream in = new ResettableFileInputStream(file,
+					tracker, ResettableFileInputStream.DEFAULT_BUF_SIZE,
+					inputCharset, decodeErrorPolicy);
 			EventDeserializer deserializer = EventDeserializerFactory
 					.getInstance(deserializerType, deserializerContext, in);
 
@@ -704,7 +671,6 @@ public class ReliableSpoolingFileEventReader implements ReliableEventReader
 			this.deserializer = deserializer;
 		}
 
-		@SuppressWarnings("unused")
 		public long getLength()
 		{
 			return length;

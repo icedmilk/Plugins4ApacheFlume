@@ -1,4 +1,3 @@
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -35,7 +34,6 @@ package com.hp.flume.plugins.source;
  * License for the specific language governing permissions and limitations under
  * the License.
  */
-
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -134,7 +132,7 @@ public class SpoolDirectorySource extends AbstractSource implements
 	}
 
 	@Override
-	public synchronized void stop()
+	public synchronized void stop()//stop operation
 	{
 		executor.shutdown();
 		try
@@ -148,7 +146,7 @@ public class SpoolDirectorySource extends AbstractSource implements
 		executor.shutdownNow();
 
 		super.stop();
-		sourceCounter.stop();//!!!! STOP
+		sourceCounter.stop();
 		logger.info("SpoolDir source {} stopped. Metrics: {}", getName(),
 				sourceCounter);
 	}
@@ -196,6 +194,7 @@ public class SpoolDirectorySource extends AbstractSource implements
 
 		// "Hack" to support backwards compatibility with previous generation of
 		// spooling directory source, which did not support deserializers
+		@SuppressWarnings("deprecation")
 		Integer bufferMaxLineLength = context
 				.getInteger(BUFFER_MAX_LINE_LENGTH);
 		if (bufferMaxLineLength != null && deserializerType != null
@@ -256,19 +255,16 @@ public class SpoolDirectorySource extends AbstractSource implements
 		}
 
 		@Override
-		public void run()
+		public void run()// lucheng
 		{
 			int backoffInterval = 250;
 			try
 			{
-				while (!Thread.interrupted())//run lucheng
+				while (!Thread.interrupted())
 				{
-//					batchSize = 3;
 					List<Event> events = reader.readEvents(batchSize);
 					if (events.isEmpty())
 					{
-//						Thread.sleep(1000);
-//						continue;
 						break;
 					}
 					sourceCounter.addToEventReceivedCount(events.size());
@@ -294,16 +290,14 @@ public class SpoolDirectorySource extends AbstractSource implements
 									: backoffInterval;
 						}
 						continue;
-						
+
 					}
-					
-					
+
 					backoffInterval = 250;
 					sourceCounter.addToEventAcceptedCount(events.size());
 					sourceCounter.incrementAppendBatchAcceptedCount();
 				}
-				
-				
+
 				logger.info("Spooling Directory Source runner has shutdown.");
 			}
 			catch (Throwable t)
